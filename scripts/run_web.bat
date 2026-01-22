@@ -1,6 +1,8 @@
 @echo off
+chcp 65001 >nul
 setlocal
-
+set "PYTHONUTF8=1"
+set "PYTHONIOENCODING=utf-8"
 cd /d "%~dp0\.."
 
 if not exist ".venv\Scripts\python.exe" (
@@ -9,12 +11,10 @@ if not exist ".venv\Scripts\python.exe" (
 )
 
 echo.
-echo [mylottery] Starting Web (Flask)...
-echo.
-echo 默认地址: http://127.0.0.1:5000
-echo 关闭请按 Ctrl+C
+echo [mylottery] 正在启动 Web(Flask)...
+echo URL: http://127.0.0.1:5000
+echo 按 Ctrl+C 停止。
 echo.
 
 start "" "http://127.0.0.1:5000"
-".venv\Scripts\python.exe" src\web\app.py
-
+".venv\Scripts\python.exe" "src\web\app.py"

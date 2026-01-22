@@ -14,7 +14,7 @@ from src.common import config, data, fetcher, lottery
 class LotteryApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("至尊彩票大师 - Desktop")
+        self.root.title("自嗨彩票 - Desktop")
         # 设置窗口大小和最小尺寸，适配不同显示器
         screen_width = root.winfo_screenwidth()
         screen_height = root.winfo_screenheight()
@@ -84,7 +84,7 @@ class LotteryApp:
 
         tk.Label(
             header_bar,
-            text="至尊彩票大师 · Desktop",
+            text="自嗨彩票 · Desktop",
             font=("Microsoft YaHei", 20, "bold"),
             bg="#2f54eb",
             fg="white",

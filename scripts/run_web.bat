@@ -4,13 +4,17 @@ setlocal
 cd /d "%~dp0\.."
 
 if not exist ".venv\Scripts\python.exe" (
-  echo ERROR: .venv not found. Please run scripts\setup.bat first.
-  echo.
-  pause
-  exit /b 1
+  call scripts\setup.bat
+  if errorlevel 1 exit /b 1
 )
 
-echo Starting web server on http://127.0.0.1:5000 ...
+echo.
+echo [mylottery] Starting Web (Flask)...
+echo.
+echo 默认地址: http://127.0.0.1:5000
+echo 关闭请按 Ctrl+C
+echo.
+
+start "" "http://127.0.0.1:5000"
 ".venv\Scripts\python.exe" src\web\app.py
 
-pause

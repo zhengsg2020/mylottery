@@ -1,47 +1,40 @@
 @echo off
-setlocal enabledelayedexpansion
-
-REM One-click setup (venv + deps) and run for Windows
-REM Requires: Python 3.x in PATH
+setlocal
 
 cd /d "%~dp0\.."
 
-echo [1/3] Checking Python...
-python --version >nul 2>&1
+echo.
+echo [mylottery] Setup (Windows)
+echo.
+
+where python >nul 2>nul
 if errorlevel 1 (
-  echo.
-  echo ERROR: Python not found in PATH.
-  echo Please install Python 3 and check "Add python.exe to PATH".
-  echo.
+  echo ERROR: 未找到 python。请先安装 Python 3 并勾选 "Add Python to PATH"。
   pause
   exit /b 1
 )
 
-echo [2/3] Creating/using virtual environment...
 if not exist ".venv\Scripts\python.exe" (
+  echo [1/2] 创建虚拟环境 .venv ...
   python -m venv .venv
   if errorlevel 1 (
-    echo.
-    echo ERROR: Failed to create venv.
+    echo ERROR: 创建虚拟环境失败。
     pause
     exit /b 1
   )
 )
 
-echo [3/3] Installing dependencies...
-".venv\Scripts\python.exe" -m pip install --upgrade pip >nul
+echo [2/2] 安装依赖 requirements.txt ...
+".venv\Scripts\python.exe" -m pip install --upgrade pip
 ".venv\Scripts\python.exe" -m pip install -r requirements.txt
 if errorlevel 1 (
-  echo.
-  echo ERROR: pip install failed.
+  echo ERROR: 安装依赖失败。
   pause
   exit /b 1
 )
 
 echo.
-echo Setup completed successfully!
-echo.
-echo To run desktop app: scripts\run_desktop.bat
-echo To run web app: scripts\run_web.bat
-echo.
+echo OK: 环境已就绪。
 pause
+exit /b 0
+

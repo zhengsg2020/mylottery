@@ -3,6 +3,30 @@ import random
 import time
 
 
+# 假设每期奖池为 1 亿，下面的金额只是演示用的固定奖级金额，
+# 并不等同于真实彩票的官方奖金规则。
+SSQ_PRIZE_AMOUNT = {
+    "★一等奖(一千万)★": 10_000_000,
+    "二等奖": 5_000_000,
+    "三等奖": 3_000_000,
+    "四等奖": 30_000,
+    "五等奖": 3_000,
+    "六等奖(5元)": 5,
+}
+
+DLT_PRIZE_AMOUNT = {
+    "★一等奖(一千万)★": 10_000_000,
+    "二等奖": 5_000_000,
+    "三等奖": 3_000_000,
+    "四等奖": 100_000,
+    "五等奖": 50_000,
+    "六等奖": 10_000,
+    "七等奖": 5_000,
+    "八等奖": 1_000,
+    "九等奖(5元)": 5,
+}
+
+
 def calculate_prize(l_type, r, b):
     """计算奖项"""
     if l_type == "ssq":
@@ -38,6 +62,18 @@ def calculate_prize(l_type, r, b):
         if r == 3 or (r == 1 and b == 2) or (r == 2 and b == 1) or b == 2:
             return "九等奖(5元)"
     return "未中奖"
+
+
+def get_prize_amount(prize: str) -> int:
+    """根据奖项名称返回假设的奖金金额（单位：元）"""
+    if not prize or prize == "未中奖":
+        return 0
+    if prize in SSQ_PRIZE_AMOUNT:
+        return SSQ_PRIZE_AMOUNT[prize]
+    if prize in DLT_PRIZE_AMOUNT:
+        return DLT_PRIZE_AMOUNT[prize]
+    # 兜底：如果未来新增文案但没配置金额，则视为 0 元
+    return 0
 
 
 def get_next_issue(winnings, l_type):

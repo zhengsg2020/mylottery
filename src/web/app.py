@@ -58,6 +58,21 @@ def prize_class(prize):
     return get_prize_color_class(prize)
 
 
+@app.template_filter("fmt_money")
+def fmt_money(amount):
+    """格式化金额：带千分位的整数"""
+    try:
+        return f"{int(amount):,}"
+    except Exception:
+        return str(amount)
+
+
+@app.template_filter("prize_amount")
+def prize_amount(prize):
+    """根据奖项名称返回对应的奖金金额（元）"""
+    return lottery.get_prize_amount(prize)
+
+
 @app.route("/", methods=["GET"])
 def index():
     """首页"""
@@ -105,7 +120,48 @@ def index():
     # 获取所有购买记录的期号
     ssq_issues = sorted(list(set(t['issue'] for t in purchased if t['type'] == 'ssq')), reverse=True)
     dlt_issues = sorted(list(set(t['issue'] for t in purchased if t['type'] == 'dlt')), reverse=True)
-    
+
+    # === 账户投注 / 中奖统计（仅统计正式购买） ===
+    total_bet = len(purchased) * 2  # 每注 2 元
+    total_win = sum(lottery.get_prize_amount(t.get("prize")) for t in purchased)
+    net_profit = total_win - total_bet
+
+    # === 我的彩票记录：按期号分页 ===
+    def _get_issue_page(issues, param_name):
+        """根据 URL 参数按期号分页，每一页对应一个期号"""
+        if not issues:
+            return None, 1, 0
+        try:
+            page = int(request.args.get(param_name, "1"))
+        except Exception:
+            page = 1
+        total = len(issues)
+        if page < 1:
+            page = 1
+        if page > total:
+            page = total
+        return issues[page - 1], page, total
+
+    # 双色球分页
+    ssq_current_issue, ssq_page, ssq_total = _get_issue_page(ssq_issues, "ssq_page")
+    ssq_current_tickets = [
+        t for t in purchased if t["type"] == "ssq" and t["issue"] == ssq_current_issue
+    ] if ssq_current_issue else []
+    ssq_current_win = next(
+        (w for w in winnings.get("ssq", []) if w["issue"] == ssq_current_issue),
+        None,
+    ) if ssq_current_issue else None
+
+    # 大乐透分页
+    dlt_current_issue, dlt_page, dlt_total = _get_issue_page(dlt_issues, "dlt_page")
+    dlt_current_tickets = [
+        t for t in purchased if t["type"] == "dlt" and t["issue"] == dlt_current_issue
+    ] if dlt_current_issue else []
+    dlt_current_win = next(
+        (w for w in winnings.get("dlt", []) if w["issue"] == dlt_current_issue),
+        None,
+    ) if dlt_current_issue else None
+
     # 准备开奖号码映射 { 'ssq_issue': [nums], ... }
     issue_win_map = {}
     for w in winnings.get('ssq', []):
@@ -151,9 +207,20 @@ def index():
         winnings=winnings,
         ssq_issues=ssq_issues,
         dlt_issues=dlt_issues,
+        ssq_current_issue=ssq_current_issue,
+        dlt_current_issue=dlt_current_issue,
+        ssq_current_tickets=ssq_current_tickets,
+        dlt_current_tickets=dlt_current_tickets,
+        ssq_current_win=ssq_current_win,
+        dlt_current_win=dlt_current_win,
+        ssq_pagination={"current": ssq_page, "total": ssq_total},
+        dlt_pagination={"current": dlt_page, "total": dlt_total},
         issue_win_map=issue_win_map,
         buy_options=buy_options,
         features=WEB_FEATURES,
+        total_bet=total_bet,
+        total_win=total_win,
+        net_profit=net_profit,
         now=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     )
 
@@ -469,14 +536,21 @@ TEMPLATE = """
     @media (max-width: 800px) { .container { grid-template-columns: 1fr; } }
     
     /* Cards */
-    .card { background: var(--card-bg); border-radius: 8px; box-shadow: 0 1px 2px rgba(0,0,0,0.03); padding: 20px; border: 1px solid #f0f0f0; }
+    .card { background: var(--card-bg); border-radius: 8px; box-shadow: 0 6px 18px rgba(0,0,0,0.06); padding: 20px; border: 1px solid #f0f0f0; }
     .card-title { font-size: 16px; font-weight: 600; margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center; }
     
     /* Status Section (Left) */
     .status-panel { display: flex; flex-direction: column; gap: 16px; }
-    .info-block { background: #fafafa; padding: 12px; border-radius: 6px; border: 1px dashed #d9d9d9; }
+    .info-block { background: linear-gradient(135deg,#fafafa,#fefefe); padding: 12px; border-radius: 6px; border: 1px dashed #d9d9d9; }
     .info-label { font-size: 12px; color: var(--text-secondary); margin-bottom: 4px; }
     .info-value { font-size: 14px; font-weight: 500; }
+
+    .stat-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:10px; margin-top:12px; }
+    .stat-item { background:#fff7e6; border-radius:6px; padding:8px 10px; border:1px solid #ffe7ba; }
+    .stat-label { font-size:12px; color:#ad6800; margin-bottom:4px; }
+    .stat-value { font-size:16px; font-weight:700; color:#d48806; }
+    .stat-value.negative { color:#cf1322; }
+    .stat-value.positive { color:#389e0d; }
 
     /* Forms & Inputs */
     .form-group { margin-bottom: 16px; }
@@ -515,9 +589,10 @@ TEMPLATE = """
     tr:hover td { background: #fafafa; }
     
     /* Balls */
-    .ball { display: inline-block; width: 28px; height: 28px; line-height: 28px; text-align: center; border-radius: 50%; color: #fff; font-size: 13px; font-weight: bold; margin-right: 4px; box-shadow: inset -2px -2px 4px rgba(0,0,0,0.2); text-shadow: 1px 1px 1px rgba(0,0,0,0.2); }
+    .ball { display: inline-block; width: 28px; height: 28px; line-height: 28px; text-align: center; border-radius: 50%; color: #fff; font-size: 13px; font-weight: bold; margin-right: 4px; box-shadow: inset -2px -2px 4px rgba(0,0,0,0.25); text-shadow: 1px 1px 1px rgba(0,0,0,0.35); transition: box-shadow 0.25s, transform 0.25s; }
     .ball-red { background: #f5222d; }
     .ball-blue { background: #1677ff; }
+    .ball-hit { box-shadow: 0 0 0 2px rgba(255,255,255,1), 0 0 0 4px rgba(250,173,20,0.9), 0 0 18px rgba(250,140,22,1); transform: translateY(-1px); }
 
     /* Tags */
     .status-tag { padding: 2px 8px; border-radius: 4px; font-size: 12px; }
@@ -541,6 +616,10 @@ TEMPLATE = """
     /* Animations */
     @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
     .card, .flash { animation: fadeIn 0.3s ease-out; }
+
+    /* Pagination / Issue selector */
+    .pagination { display: flex; align-items: center; justify-content: flex-end; gap: 8px; font-size: 13px; margin-bottom: 8px; color: #666; }
+    .pagination select { min-width: 140px; }
   </style>
   <script>
     var buyOptions = {{ buy_options|tojson }};
@@ -587,13 +666,57 @@ TEMPLATE = """
     }
 
     function switchHistoryTab(type) {
-        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-        event.target.classList.add('active');
-        document.querySelectorAll('.history-tab-content').forEach(c => c.style.display = 'none');
-        document.getElementById('history-' + type).style.display = 'block';
+        document.querySelectorAll('.tab-btn').forEach(function (b) {
+            var t = b.getAttribute('data-tab');
+            if (t === type) {
+                b.classList.add('active');
+            } else {
+                b.classList.remove('active');
+            }
+        });
+        document.querySelectorAll('.history-tab-content').forEach(function (c) {
+            c.style.display = (c.id === 'history-' + type) ? 'block' : 'none';
+        });
     }
 
-    window.addEventListener('DOMContentLoaded', updateBuyIssues);
+    function selectIssue(type) {
+        var ssqSelect = document.getElementById('ssq_issue_select');
+        var dltSelect = document.getElementById('dlt_issue_select');
+        var ssqPage = {{ ssq_pagination.current }};
+        var dltPage = {{ dlt_pagination.current }};
+
+        if (ssqSelect && ssqSelect.value) {
+            ssqPage = ssqSelect.value;
+        }
+        if (dltSelect && dltSelect.value) {
+            dltPage = dltSelect.value;
+        }
+
+        // 保持两种彩票当前选择的页码，只更新被操作的那个
+        if (type === 'ssq' && ssqSelect) {
+            ssqPage = ssqSelect.value;
+        } else if (type === 'dlt' && dltSelect) {
+            dltPage = dltSelect.value;
+        }
+
+        var params = new URLSearchParams(window.location.search);
+        params.set('ssq_page', ssqPage);
+        params.set('dlt_page', dltPage);
+        params.set('tab', type); // 保持当前选中的标签页
+        // 跳转到“我的彩票记录”锚点，避免每次都滚回页面最上方
+        window.location.href = '?' + params.toString() + '#records';
+    }
+
+    function initHistoryTab() {
+        var params = new URLSearchParams(window.location.search);
+        var active = params.get('tab') || 'ssq';
+        switchHistoryTab(active);
+    }
+
+    window.addEventListener('DOMContentLoaded', function () {
+        updateBuyIssues();
+        initHistoryTab();
+    });
   </script>
 </head>
 <body>
@@ -632,6 +755,22 @@ TEMPLATE = """
             <div class="info-block" style="margin-top: 10px;">
                 <div class="info-label">数据源</div>
                 <div class="info-value">500.com (实时)</div>
+            </div>
+            <div class="stat-grid">
+                <div class="stat-item">
+                    <div class="stat-label">累计购票金额</div>
+                    <div class="stat-value">{{ total_bet|fmt_money }} 元</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">累计中奖金额</div>
+                    <div class="stat-value">{{ total_win|fmt_money }} 元</div>
+                </div>
+                <div class="stat-item" style="grid-column:1 / -1;">
+                    <div class="stat-label">盈亏统计</div>
+                    <div class="stat-value {% if net_profit >= 0 %}positive{% else %}negative{% endif %}">
+                        {% if net_profit >= 0 %}+{{ net_profit|fmt_money }} 元{% else %}{{ net_profit|fmt_money }} 元{% endif %}
+                    </div>
+                </div>
             </div>
             
             <form method="post" action="{{ url_for('update') }}" style="margin-top: 20px;">
@@ -730,7 +869,7 @@ TEMPLATE = """
     </div>
 
     <!-- Full Width: Records -->
-    <div class="card table-card">
+    <div id="records" class="card table-card">
         <div class="card-title">
             <span>我的彩票记录 {% if purchased %}<span style="font-weight: normal; color: #999; font-size: 14px;">(共 {{ purchased|length }} 条)</span>{% endif %}</span>
             <form method="post" action="{{ url_for('check') }}" style="margin:0;">
@@ -744,11 +883,38 @@ TEMPLATE = """
 
         {% if purchased %}
             <div class="tabs">
-                <div class="tab active tab-btn" onclick="switchHistoryTab('ssq')">双色球</div>
-                <div class="tab tab-btn" onclick="switchHistoryTab('dlt')">大乐透</div>
+                <div class="tab active tab-btn" data-tab="ssq" onclick="switchHistoryTab('ssq')">双色球</div>
+                <div class="tab tab-btn" data-tab="dlt" onclick="switchHistoryTab('dlt')">大乐透</div>
             </div>
 
             <div id="history-ssq" class="history-tab-content">
+                {% if ssq_current_issue %}
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; font-size:13px; color:#595959;">
+                    <div>
+                        当前期号：<strong>{{ ssq_current_issue }}</strong>
+                        {% if ssq_current_win %}
+                          <span style="margin-left:8px; color:#8c8c8c;">当期开奖号码：</span>
+                          {% for n in ssq_current_win.nums[0] %}
+                            <span class="ball ball-red">{{ n|fmt_num }}</span>
+                          {% endfor %}
+                          {% for n in ssq_current_win.nums[1] %}
+                            <span class="ball ball-blue">{{ n|fmt_num }}</span>
+                          {% endfor %}
+                        {% else %}
+                          <span style="margin-left:8px; color:#faad14;">该期暂无开奖号码，请先联网更新。</span>
+                        {% endif %}
+                    </div>
+                    <div class="pagination">
+                        <span>选择期号：</span>
+                        <select id="ssq_issue_select" onchange="selectIssue('ssq')">
+                          {% for iss in ssq_issues %}
+                            <option value="{{ loop.index }}" {% if iss == ssq_current_issue %}selected{% endif %}>
+                              第 {{ iss }} 期
+                            </option>
+                          {% endfor %}
+                        </select>
+                    </div>
+                </div>
                 <div class="table-wrapper">
                     <table>
                         <thead>
@@ -761,12 +927,16 @@ TEMPLATE = """
                             </tr>
                         </thead>
                         <tbody>
-                            {% for t in purchased|selectattr("type", "equalto", "ssq")|reverse %}
+                            {% for t in ssq_current_tickets|reverse %}
                             <tr>
                                 <td>{{ t.issue }}</td>
                                 <td>
-                                    {% for n in t.nums[0] %}<span class="ball ball-red">{{ n|fmt_num }}</span>{% endfor %}
-                                    {% for n in t.nums[1] %}<span class="ball ball-blue">{{ n|fmt_num }}</span>{% endfor %}
+                                    {% for n in t.nums[0] %}
+                                      <span class="ball ball-red {% if ssq_current_win and n in ssq_current_win.nums[0] %}ball-hit{% endif %}">{{ n|fmt_num }}</span>
+                                    {% endfor %}
+                                    {% for n in t.nums[1] %}
+                                      <span class="ball ball-blue {% if ssq_current_win and n in ssq_current_win.nums[1] %}ball-hit{% endif %}">{{ n|fmt_num }}</span>
+                                    {% endfor %}
                                 </td>
                                 <td>{{ t.time }}</td>
                                 <td>
@@ -781,16 +951,52 @@ TEMPLATE = """
                                     {% endif %}
                                 </td>
                                 <td style="font-weight: bold; color: {% if '一等奖' in t.prize %}#ffd700{% elif '二' in t.prize %}#ff7a00{% else %}#52c41a{% endif %}">
-                                    {{ t.prize if t.prize != '未中奖' else '-' }}
+                                    {% if t.prize and t.prize != '未中奖' %}
+                                      {{ t.prize }}（{{ t.prize|prize_amount|fmt_money }} 元）
+                                    {% else %}
+                                      -
+                                    {% endif %}
                                 </td>
                             </tr>
                             {% endfor %}
                         </tbody>
                     </table>
                 </div>
+                {% else %}
+                  <div style="padding: 20px; text-align: center; color: #999;">
+                    暂无双色球购买记录。
+                  </div>
+                {% endif %}
             </div>
 
             <div id="history-dlt" class="history-tab-content" style="display:none;">
+                {% if dlt_current_issue %}
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; font-size:13px; color:#595959;">
+                    <div>
+                        当前期号：<strong>{{ dlt_current_issue }}</strong>
+                        {% if dlt_current_win %}
+                          <span style="margin-left:8px; color:#8c8c8c;">当期开奖号码：</span>
+                          {% for n in dlt_current_win.nums[0] %}
+                            <span class="ball ball-red">{{ n|fmt_num }}</span>
+                          {% endfor %}
+                          {% for n in dlt_current_win.nums[1] %}
+                            <span class="ball ball-blue">{{ n|fmt_num }}</span>
+                          {% endfor %}
+                        {% else %}
+                          <span style="margin-left:8px; color:#faad14;">该期暂无开奖号码，请先联网更新。</span>
+                        {% endif %}
+                    </div>
+                    <div class="pagination">
+                        <span>选择期号：</span>
+                        <select id="dlt_issue_select" onchange="selectIssue('dlt')">
+                          {% for iss in dlt_issues %}
+                            <option value="{{ loop.index }}" {% if iss == dlt_current_issue %}selected{% endif %}>
+                              第 {{ iss }} 期
+                            </option>
+                          {% endfor %}
+                        </select>
+                    </div>
+                </div>
                 <div class="table-wrapper">
                     <table>
                         <thead>
@@ -803,12 +1009,16 @@ TEMPLATE = """
                             </tr>
                         </thead>
                         <tbody>
-                            {% for t in purchased|selectattr("type", "equalto", "dlt")|reverse %}
+                            {% for t in dlt_current_tickets|reverse %}
                             <tr>
                                 <td>{{ t.issue }}</td>
                                 <td>
-                                    {% for n in t.nums[0] %}<span class="ball ball-red">{{ n|fmt_num }}</span>{% endfor %}
-                                    {% for n in t.nums[1] %}<span class="ball ball-blue">{{ n|fmt_num }}</span>{% endfor %}
+                                    {% for n in t.nums[0] %}
+                                      <span class="ball ball-red {% if dlt_current_win and n in dlt_current_win.nums[0] %}ball-hit{% endif %}">{{ n|fmt_num }}</span>
+                                    {% endfor %}
+                                    {% for n in t.nums[1] %}
+                                      <span class="ball ball-blue {% if dlt_current_win and n in dlt_current_win.nums[1] %}ball-hit{% endif %}">{{ n|fmt_num }}</span>
+                                    {% endfor %}
                                 </td>
                                 <td>{{ t.time }}</td>
                                 <td>
@@ -823,13 +1033,22 @@ TEMPLATE = """
                                     {% endif %}
                                 </td>
                                 <td style="font-weight: bold; color: {% if '一等奖' in t.prize %}#ffd700{% elif '二' in t.prize %}#ff7a00{% else %}#52c41a{% endif %}">
-                                    {{ t.prize if t.prize != '未中奖' else '-' }}
+                                    {% if t.prize and t.prize != '未中奖' %}
+                                      {{ t.prize }}（{{ t.prize|prize_amount|fmt_money }} 元）
+                                    {% else %}
+                                      -
+                                    {% endif %}
                                 </td>
                             </tr>
                             {% endfor %}
                         </tbody>
                     </table>
                 </div>
+                {% else %}
+                  <div style="padding: 20px; text-align: center; color: #999;">
+                    暂无大乐透购买记录。
+                  </div>
+                {% endif %}
             </div>
         {% else %}
             <div style="text-align: center; padding: 40px; color: #999;">
@@ -880,7 +1099,13 @@ TEMPLATE = """
                                 <span class="status-tag status-wait">待开奖</span>
                             {% endif %}
                         </td>
-                        <td>{{ t.prize }}</td>
+                        <td>
+                            {% if t.prize and t.prize != '未中奖' %}
+                              {{ t.prize }}（{{ t.prize|prize_amount|fmt_money }} 元）
+                            {% else %}
+                              {{ t.prize or '-' }}
+                            {% endif %}
+                        </td>
                     </tr>
                     {% endfor %}
                 </tbody>

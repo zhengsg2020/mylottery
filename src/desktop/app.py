@@ -298,8 +298,43 @@ class LotteryApp:
         def worker():
             self.log("📡 正在连接中国体彩/福彩数据中心...")
             try:
-                self.winning_data["ssq"] = fetcher.fetch_500_data("ssq")
-                self.winning_data["dlt"] = fetcher.fetch_500_data("dlt")
+                # 增量更新：首次拉取 1000 期，以后只追加新增期次
+                for l_type in ["ssq", "dlt"]:
+                    existing = self.winning_data.get(l_type) or []
+                    if not existing:
+                        # 本地无数据，拉取最近 1000 期
+                        self.winning_data[l_type] = fetcher.fetch_500_data(l_type, limit=1000)
+                        continue
+
+                    latest_local = existing[0]["issue"]
+                    remote = fetcher.fetch_500_data(l_type, limit=200)
+                    if not remote:
+                        continue
+
+                    # 若远端最新期号与本地一致，则无需更新
+                    if remote[0]["issue"] == latest_local:
+                        continue
+
+                    # 找到本地最新期号在远端结果中的位置
+                    idx = next((i for i, r in enumerate(remote) if r["issue"] == latest_local), None)
+                    if idx is None:
+                        # 找不到，说明本地数据太旧或不连续，直接用远端+旧数据去重重建，最多保留 1000 期
+                        merged = []
+                        seen = set()
+                        for item in remote + existing:
+                            if item["issue"] in seen:
+                                continue
+                            seen.add(item["issue"])
+                            merged.append(item)
+                            if len(merged) >= 1000:
+                                break
+                        self.winning_data[l_type] = merged
+                    else:
+                        # 只在前面追加新增的若干期
+                        new_items = remote[:idx]
+                        if new_items:
+                            self.winning_data[l_type] = new_items + existing
+
                 self.save_all_data()
                 self.root.after(
                     0,

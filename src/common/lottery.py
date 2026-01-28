@@ -84,8 +84,78 @@ def get_next_issue(winnings, l_type):
     return str(latest + 1)
 
 
+def _init_weight_dict(max_number: int):
+    """初始化 1..max_number 的权重字典"""
+    return {i: 1 for i in range(1, max_number + 1)}
+
+
+def _count_history_nums(winnings, l_type, history_count: int = 100):
+    """统计最近 N 期开奖中每个号码出现次数"""
+    history = winnings.get(l_type, [])[:history_count]
+    if l_type == "ssq":
+        red_weights = _init_weight_dict(33)
+        blue_weights = _init_weight_dict(16)
+    else:
+        red_weights = _init_weight_dict(35)
+        blue_weights = _init_weight_dict(12)
+
+    for item in history:
+        reds, blues = item["nums"]
+        for n in reds:
+            if n in red_weights:
+                red_weights[n] += 1
+        for n in blues:
+            if n in blue_weights:
+                blue_weights[n] += 1
+    return red_weights, blue_weights
+
+
+def _pick_by_weight(candidates, weights, count):
+    """根据权重不放回抽取 count 个不同的号码"""
+    pool = list(candidates)
+    result = []
+    for _ in range(count):
+        total = sum(weights[n] for n in pool)
+        r = random.uniform(0, total)
+        acc = 0.0
+        chosen = pool[0]
+        for n in pool:
+            acc += weights[n]
+            if r <= acc:
+                chosen = n
+                break
+        result.append(chosen)
+        pool.remove(chosen)
+    return sorted(result)
+
+
+def generate_recommended_nums(winnings, l_type, history_count: int = 100):
+    """基于最近 N 期历史的简单“热号/冷号”权重生成一注推荐号码"""
+    red_w, blue_w = _count_history_nums(winnings, l_type, history_count=history_count)
+    if l_type == "ssq":
+        reds = _pick_by_weight(range(1, 34), red_w, 6)
+        blues = _pick_by_weight(range(1, 17), blue_w, 1)
+    else:
+        reds = _pick_by_weight(range(1, 36), red_w, 5)
+        blues = _pick_by_weight(range(1, 13), blue_w, 2)
+    return [reds, blues]
+
+
+def _build_ticket(l_type, issue, nums, recommended: bool = False):
+    """内部工具：构造一张彩票记录"""
+    return {
+        "type": l_type,
+        "issue": issue,
+        "nums": nums,
+        "checked": False,
+        "time": time.strftime("%Y-%m-%d %H:%M"),
+        "prize": "",
+        "recommended": recommended,
+    }
+
+
 def generate_ticket(l_type, issue, is_test=False):
-    """生成一张彩票"""
+    """生成一张随机彩票"""
     if l_type == "ssq":
         nums = [
             sorted(random.sample(range(1, 34), 6)),
@@ -97,14 +167,25 @@ def generate_ticket(l_type, issue, is_test=False):
             sorted(random.sample(range(1, 13), 2)),
         ]
 
-    return {
-        "type": l_type,
-        "issue": issue,
-        "nums": nums,
-        "checked": False,
-        "time": time.strftime("%Y-%m-%d %H:%M"),
-        "prize": "",
-    }
+    return _build_ticket(l_type, issue, nums, recommended=False)
+
+
+def create_ticket_with_nums(l_type, issue, nums, recommended: bool = False):
+    """根据指定号码创建一张彩票（供推荐购买使用）"""
+    # 简单校验长度，避免脏数据
+    if l_type == "ssq":
+        if len(nums) != 2 or len(nums[0]) != 6 or len(nums[1]) != 1:
+            raise ValueError("非法的双色球号码结构")
+    else:
+        if len(nums) != 2 or len(nums[0]) != 5 or len(nums[1]) != 2:
+            raise ValueError("非法的大乐透号码结构")
+    # 规范化排序
+    return _build_ticket(
+        l_type,
+        issue,
+        [sorted(nums[0]), sorted(nums[1])],
+        recommended=recommended,
+    )
 
 
 def check_ticket(ticket, winnings):

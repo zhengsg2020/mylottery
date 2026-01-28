@@ -127,14 +127,28 @@ def index():
     net_profit = total_win - total_bet
 
     # === 我的彩票记录：按期号分页 ===
-    def _get_issue_page(issues, param_name):
+    # 默认展示「最近且已经有开奖数据的一期」，如果找不到就用最新一期
+    def _default_page_for_type(issues, l_type):
+        if not issues:
+            return 1
+        opened_issues = {w["issue"] for w in winnings.get(l_type, [])}
+        for idx, iss in enumerate(issues, start=1):
+            if iss in opened_issues:
+                return idx
+        return 1
+
+    def _get_issue_page(issues, param_name, l_type):
         """根据 URL 参数按期号分页，每一页对应一个期号"""
         if not issues:
             return None, 1, 0
-        try:
-            page = int(request.args.get(param_name, "1"))
-        except Exception:
-            page = 1
+        raw = request.args.get(param_name)
+        if raw is None:
+            page = _default_page_for_type(issues, l_type)
+        else:
+            try:
+                page = int(raw)
+            except Exception:
+                page = 1
         total = len(issues)
         if page < 1:
             page = 1
@@ -143,7 +157,7 @@ def index():
         return issues[page - 1], page, total
 
     # 双色球分页
-    ssq_current_issue, ssq_page, ssq_total = _get_issue_page(ssq_issues, "ssq_page")
+    ssq_current_issue, ssq_page, ssq_total = _get_issue_page(ssq_issues, "ssq_page", "ssq")
     ssq_current_tickets = [
         t for t in purchased if t["type"] == "ssq" and t["issue"] == ssq_current_issue
     ] if ssq_current_issue else []
@@ -153,7 +167,7 @@ def index():
     ) if ssq_current_issue else None
 
     # 大乐透分页
-    dlt_current_issue, dlt_page, dlt_total = _get_issue_page(dlt_issues, "dlt_page")
+    dlt_current_issue, dlt_page, dlt_total = _get_issue_page(dlt_issues, "dlt_page", "dlt")
     dlt_current_tickets = [
         t for t in purchased if t["type"] == "dlt" and t["issue"] == dlt_current_issue
     ] if dlt_current_issue else []
@@ -168,6 +182,24 @@ def index():
         issue_win_map[f"ssq_{w['issue']}"] = w['nums']
     for w in winnings.get('dlt', []):
         issue_win_map[f"dlt_{w['issue']}"] = w['nums']
+
+    # 智能推荐：根据 query 参数决定是否生成推荐号码
+    analyze_type = request.args.get("analyze_type")
+    recommendations = None
+    if analyze_type in {"ssq", "dlt"} and winnings.get(analyze_type):
+        try:
+            target_issue = lottery.get_next_issue(winnings, analyze_type)
+            rec_items = []
+            for i in range(10):
+                nums = lottery.generate_recommended_nums(winnings, analyze_type, history_count=100)
+                rec_items.append({"index": i, "nums": nums})
+            recommendations = {
+                "type": analyze_type,
+                "issue": target_issue,
+                "items": rec_items,
+            }
+        except Exception:
+            recommendations = None
 
     # 准备可购买的期号列表
     # real: 下一期 + 未来9期 (共10期)
@@ -215,6 +247,7 @@ def index():
         dlt_current_win=dlt_current_win,
         ssq_pagination={"current": ssq_page, "total": ssq_total},
         dlt_pagination={"current": dlt_page, "total": dlt_total},
+        recommendations=recommendations,
         issue_win_map=issue_win_map,
         buy_options=buy_options,
         features=WEB_FEATURES,
@@ -233,8 +266,41 @@ def update():
         return redirect(url_for("index"))
     purchased, winnings = data.load_all_data()
     try:
-        winnings["ssq"] = fetcher.fetch_500_data("ssq")
-        winnings["dlt"] = fetcher.fetch_500_data("dlt")
+        for l_type in ["ssq", "dlt"]:
+            existing = winnings.get(l_type) or []
+            if not existing:
+                # 本地无数据：一次性拉取最近 1000 期
+                winnings[l_type] = fetcher.fetch_500_data(l_type, limit=1000)
+                continue
+
+            latest_local = existing[0]["issue"]
+            remote = fetcher.fetch_500_data(l_type, limit=200)
+            if not remote:
+                continue
+
+            # 已经最新则不更新
+            if remote[0]["issue"] == latest_local:
+                continue
+
+            # 找到本地最新期号在远端中的位置
+            idx = next((i for i, r in enumerate(remote) if r["issue"] == latest_local), None)
+            if idx is None:
+                # 太久没更新，合并去重，最多保留 1000 期
+                merged = []
+                seen = set()
+                for item in remote + existing:
+                    if item["issue"] in seen:
+                        continue
+                    seen.add(item["issue"])
+                    merged.append(item)
+                    if len(merged) >= 1000:
+                        break
+                winnings[l_type] = merged
+            else:
+                new_items = remote[:idx]
+                if new_items:
+                    winnings[l_type] = new_items + existing
+
         data.save_all_data(purchased, winnings)
         flash(
             f"更新成功！最新期：SSQ-{winnings['ssq'][0]['issue']} | DLT-{winnings['dlt'][0]['issue']}",
@@ -313,6 +379,65 @@ def buy():
     return redirect(url_for("index"))
 
 
+@app.post("/buy_recommend")
+def buy_recommend():
+    """购买智能推荐的号码（正式购买，带推荐标记）"""
+    if not WEB_FEATURES["enable_buy"]:
+        flash("该功能在网页版已被管理员关闭。", "warning")
+        return redirect(url_for("index"))
+
+    l_type = request.form.get("type")
+    issue = request.form.get("issue")
+    chosen = request.form.getlist("choose")
+
+    if not l_type or l_type not in {"ssq", "dlt"}:
+        flash("无效的彩种类型。", "error")
+        return redirect(url_for("index"))
+
+    if not chosen:
+        flash("请至少选择一组推荐号码。", "warning")
+        return redirect(url_for("index", analyze_type=l_type) + "#recommend")
+
+    purchased, winnings = data.load_all_data()
+    if not winnings.get(l_type):
+        flash("请先联网更新获取开奖数据。", "warning")
+        return redirect(url_for("index"))
+
+    # 如果未提供期号，则默认使用下一期
+    if not issue:
+        issue = lottery.get_next_issue(winnings, l_type)
+
+    new_tickets = []
+    for idx in chosen:
+        line = request.form.get(f"nums_{idx}")
+        if not line:
+            continue
+        try:
+            parts = [p.strip() for p in line.split("|")]
+            reds = [int(x) for x in parts[0].split()]
+            blues = [int(x) for x in parts[1].split()] if len(parts) > 1 else []
+            nums = [reds, blues]
+            ticket = lottery.create_ticket_with_nums(
+                l_type, issue, nums, recommended=True
+            )
+            new_tickets.append(ticket)
+        except Exception:
+            continue
+
+    if not new_tickets:
+        flash("解析推荐号码失败，未生成任何有效注数。", "error")
+        return redirect(url_for("index", analyze_type=l_type) + "#recommend")
+
+    purchased.extend(new_tickets)
+    data.save_all_data(purchased, winnings)
+
+    flash(
+        f"已根据智能推荐成功购买 {len(new_tickets)} 注 {'双色球' if l_type=='ssq' else '大乐透'} [第 {issue} 期]（已标记为推荐）",
+        "success",
+    )
+    return redirect(url_for("index") + "#records")
+
+
 @app.post("/check")
 def check():
     """批量兑奖"""
@@ -344,8 +469,35 @@ def check():
     if need_update and WEB_FEATURES["enable_update"]:
         try:
             # 尝试更新数据
-            winnings["ssq"] = fetcher.fetch_500_data("ssq")
-            winnings["dlt"] = fetcher.fetch_500_data("dlt")
+            for l_type in ["ssq", "dlt"]:
+                existing = winnings.get(l_type) or []
+                if not existing:
+                    winnings[l_type] = fetcher.fetch_500_data(l_type, limit=1000)
+                    continue
+
+                latest_local = existing[0]["issue"]
+                remote = fetcher.fetch_500_data(l_type, limit=200)
+                if not remote:
+                    continue
+                if remote[0]["issue"] == latest_local:
+                    continue
+
+                idx = next((i for i, r in enumerate(remote) if r["issue"] == latest_local), None)
+                if idx is None:
+                    merged = []
+                    seen = set()
+                    for item in remote + existing:
+                        if item["issue"] in seen:
+                            continue
+                        seen.add(item["issue"])
+                        merged.append(item)
+                        if len(merged) >= 1000:
+                            break
+                    winnings[l_type] = merged
+                else:
+                    new_items = remote[:idx]
+                    if new_items:
+                        winnings[l_type] = new_items + existing
             # 保存更新后的开奖数据(此时还不保存purchased状态，下面统一保存)
             # 注意：data.save_all_data需要purchased参数，这里暂时不保存，等兑奖完了一起保存
             # 但为了防止check_ticket用到旧数据，我们已经更新了winnings变量
@@ -482,6 +634,169 @@ def verify():
     return redirect(url_for("index"))
 
 
+@app.post("/analyze")
+def analyze():
+    """分析下期开奖，给出推荐号码"""
+    l_type = request.form.get("analyze_type", "dlt")
+    if l_type not in {"ssq", "dlt"}:
+        l_type = "dlt"
+
+    purchased, winnings = data.load_all_data()
+    test_tickets = data.load_test_data()
+
+    if not winnings.get(l_type):
+        flash("暂无开奖数据，请先点击“立即更新数据”。", "warning")
+        return redirect(url_for("index"))
+
+    # 生成 10 组推荐号码
+    recommended_groups = []
+    for _ in range(10):
+        nums = lottery.generate_recommended_nums(winnings, l_type, history_count=100)
+        reds, blues = nums
+        recommended_groups.append(
+            {
+                "nums": nums,
+                "red_str": " ".join(f"{n:02d}" for n in reds),
+                "blue_str": " ".join(f"{n:02d}" for n in blues),
+            }
+        )
+
+    # 重新渲染首页，但携带推荐结果（其余逻辑与 index 基本一致）
+    # --- 以下逻辑与 index() 中相同，只是多传了 recommended_groups / analyze_type ---
+
+    # 正式购买的中奖票据
+    formal_winning_tickets = [t for t in purchased if t.get("checked") and t.get("prize") and t.get("prize") != "未中奖"]
+    
+    # 按期号分组正式中奖票据
+    formal_wins_by_issue = {}
+    for t in formal_winning_tickets:
+        key = f"{t['type']}_{t['issue']}"
+        if key not in formal_wins_by_issue:
+            win_info = next((w for w in winnings.get(t['type'], []) if w['issue'] == t['issue']), None)
+            formal_wins_by_issue[key] = {
+                "type": t['type'],
+                "issue": t['issue'],
+                "win_nums": win_info['nums'] if win_info else None,
+                "tickets": []
+            }
+        formal_wins_by_issue[key]["tickets"].append(t)
+    
+    sorted_issue_keys = sorted(formal_wins_by_issue.keys(), key=lambda k: formal_wins_by_issue[k]['issue'], reverse=True)
+
+    # 测试购买的中奖票据（分开显示）
+    test_winning_tickets = [t for t in test_tickets if t.get("checked") and t.get("prize") and t.get("prize") != "未中奖"]
+    
+    test_wins_by_issue = {}
+    for t in test_winning_tickets:
+        key = f"{t['type']}_{t['issue']}"
+        if key not in test_wins_by_issue:
+            win_info = next((w for w in winnings.get(t['type'], []) if w['issue'] == t['issue']), None)
+            test_wins_by_issue[key] = {
+                "type": t['type'],
+                "issue": t['issue'],
+                "win_nums": win_info['nums'] if win_info else None,
+                "tickets": []
+            }
+        test_wins_by_issue[key]["tickets"].append(t)
+    
+    sorted_test_issue_keys = sorted(test_wins_by_issue.keys(), key=lambda k: test_wins_by_issue[k]['issue'], reverse=True)
+
+    ssq_issues = sorted(list(set(t['issue'] for t in purchased if t['type'] == 'ssq')), reverse=True)
+    dlt_issues = sorted(list(set(t['issue'] for t in purchased if t['type'] == 'dlt')), reverse=True)
+
+    total_bet = len(purchased) * 2
+    total_win = sum(lottery.get_prize_amount(t.get("prize")) for t in purchased)
+    net_profit = total_win - total_bet
+
+    def _get_issue_page(issues, param_name):
+        if not issues:
+            return None, 1, 0
+        try:
+            page = int(request.args.get(param_name, "1"))
+        except Exception:
+            page = 1
+        total = len(issues)
+        if page < 1:
+            page = 1
+        if page > total:
+            page = total
+        return issues[page - 1], page, total
+
+    ssq_current_issue, ssq_page, ssq_total = _get_issue_page(ssq_issues, "ssq_page")
+    ssq_current_tickets = [
+        t for t in purchased if t["type"] == "ssq" and t["issue"] == ssq_current_issue
+    ] if ssq_current_issue else []
+    ssq_current_win = next(
+        (w for w in winnings.get("ssq", []) if w["issue"] == ssq_current_issue),
+        None,
+    ) if ssq_current_issue else None
+
+    dlt_current_issue, dlt_page, dlt_total = _get_issue_page(dlt_issues, "dlt_page")
+    dlt_current_tickets = [
+        t for t in purchased if t["type"] == "dlt" and t["issue"] == dlt_current_issue
+    ] if dlt_current_issue else []
+    dlt_current_win = next(
+        (w for w in winnings.get("dlt", []) if w["issue"] == dlt_current_issue),
+        None,
+    ) if dlt_current_issue else None
+
+    issue_win_map = {}
+    for w in winnings.get('ssq', []):
+        issue_win_map[f"ssq_{w['issue']}"] = w['nums']
+    for w in winnings.get('dlt', []):
+        issue_win_map[f"dlt_{w['issue']}"] = w['nums']
+
+    buy_options = {"ssq": {"real": [], "test": []}, "dlt": {"real": [], "test": []}}
+    for lt in ["ssq", "dlt"]:
+        next_iss = lottery.get_next_issue(winnings, lt)
+        try:
+            current_int = int(next_iss)
+            for i in range(10):
+                future_iss = str(current_int + i)
+                label_text = f"下一期 ({future_iss})" if i == 0 else f"未来第 {i+1} 期 ({future_iss})"
+                buy_options[lt]["real"].append({"value": future_iss, "label": label_text})
+        except:
+            buy_options[lt]["real"].append({"value": next_iss, "label": f"下一期 ({next_iss})"})
+
+        buy_options[lt]["test"].append({"value": next_iss, "label": f"下一期 ({next_iss})"})
+        history = winnings.get(lt, [])
+        for i in range(min(len(history), 9)):
+            iss = history[i]["issue"]
+            buy_options[lt]["test"].append({"value": iss, "label": f"第 {iss} 期"})
+
+    return render_template_string(
+        TEMPLATE,
+        purchased=purchased,
+        test_tickets=test_tickets,
+        formal_winning_tickets=formal_winning_tickets,
+        formal_wins_by_issue=formal_wins_by_issue,
+        sorted_issue_keys=sorted_issue_keys,
+        test_winning_tickets=test_winning_tickets,
+        test_wins_by_issue=test_wins_by_issue,
+        sorted_test_issue_keys=sorted_test_issue_keys,
+        winnings=winnings,
+        ssq_issues=ssq_issues,
+        dlt_issues=dlt_issues,
+        ssq_current_issue=ssq_current_issue,
+        dlt_current_issue=dlt_current_issue,
+        ssq_current_tickets=ssq_current_tickets,
+        dlt_current_tickets=dlt_current_tickets,
+        ssq_current_win=ssq_current_win,
+        dlt_current_win=dlt_current_win,
+        ssq_pagination={"current": ssq_page, "total": ssq_total},
+        dlt_pagination={"current": dlt_page, "total": dlt_total},
+        issue_win_map=issue_win_map,
+        buy_options=buy_options,
+        features=WEB_FEATURES,
+        total_bet=total_bet,
+        total_win=total_win,
+        net_profit=net_profit,
+        recommended_groups=recommended_groups,
+        analyze_type=l_type,
+        now=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    )
+
+
 @app.post("/clear_test")
 def clear_test():
     """清空测试购买记录（不影响正式购买）"""
@@ -599,6 +914,8 @@ TEMPLATE = """
     .status-won { background: #f6ffed; color: #52c41a; border: 1px solid #b7eb8f; }
     .status-lost { background: #fff2f0; color: #ff4d4f; border: 1px solid #ffccc7; }
     .status-wait { background: #f5f5f5; color: #8c8c8c; border: 1px solid #d9d9d9; }
+
+    .tag-rec { display:inline-block; padding:0 6px; margin-right:4px; border-radius:10px; font-size:11px; background:#fff1f0; color:#cf1322; border:1px solid #ffa39e; }
 
     /* Tabs */
     .tabs { display: flex; border-bottom: 1px solid #e8e8e8; margin-bottom: 16px; }
@@ -783,6 +1100,17 @@ TEMPLATE = """
                   <button class="btn btn-ghost btn-block" type="button" disabled>更新已关闭</button>
                 {% endif %}
             </form>
+            
+            <div style="margin-top: 12px; display:flex; gap:8px;">
+                <form method="get" action="{{ url_for('index') }}" style="flex:1; margin:0;">
+                    <input type="hidden" name="analyze_type" value="ssq">
+                    <button class="btn btn-ghost btn-block" type="submit">🎯 分析下一期双色球</button>
+                </form>
+                <form method="get" action="{{ url_for('index') }}" style="flex:1; margin:0;">
+                    <input type="hidden" name="analyze_type" value="dlt">
+                    <button class="btn btn-ghost btn-block" type="submit">🎯 分析下一期大乐透</button>
+                </form>
+            </div>
         </div>
 
         <div class="card">
@@ -868,6 +1196,53 @@ TEMPLATE = """
         </form>
     </div>
 
+    {% if recommendations %}
+    <!-- 推荐号码区域 -->
+    <div id="recommend" class="card table-card">
+        <div class="card-title">
+            <span>智能推荐 · {{ '双色球' if recommendations.type=='ssq' else '大乐透' }} 第 {{ recommendations.issue }} 期</span>
+        </div>
+        <form method="post" action="{{ url_for('buy_recommend') }}">
+            <input type="hidden" name="type" value="{{ recommendations.type }}">
+            <input type="hidden" name="issue" value="{{ recommendations.issue }}">
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th width="60">选择</th>
+                            <th>号码</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for item in recommendations['items'] %}
+                        {% set reds = item.nums[0] %}
+                        {% set blues = item.nums[1] %}
+                        <tr>
+                            <td>
+                                <input type="checkbox" name="choose" value="{{ item.index }}">
+                                <input type="hidden" name="nums_{{ item.index }}" value="{{ reds|join(' ') }} | {{ blues|join(' ') }}">
+                            </td>
+                            <td>
+                                {% for n in reds %}<span class="ball ball-red">{{ n|fmt_num }}</span>{% endfor %}
+                                {% for n in blues %}<span class="ball ball-blue">{{ n|fmt_num }}</span>{% endfor %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            <div style="margin-top: 12px; text-align: right; font-size: 12px; color:#999;">
+                系统根据最近开奖数据生成，仅供娱乐参考，不能保证中奖。
+            </div>
+            <div style="margin-top: 8px; text-align: right;">
+                <button class="btn btn-primary" type="submit">
+                    🎯 购买选中推荐号码
+                </button>
+            </div>
+        </form>
+    </div>
+    {% endif %}
+
     <!-- Full Width: Records -->
     <div id="records" class="card table-card">
         <div class="card-title">
@@ -929,7 +1304,12 @@ TEMPLATE = """
                         <tbody>
                             {% for t in ssq_current_tickets|reverse %}
                             <tr>
-                                <td>{{ t.issue }}</td>
+                                <td>
+                                    {% if t.recommended %}
+                                      <span class="tag-rec">荐</span>
+                                    {% endif %}
+                                    {{ t.issue }}
+                                </td>
                                 <td>
                                     {% for n in t.nums[0] %}
                                       <span class="ball ball-red {% if ssq_current_win and n in ssq_current_win.nums[0] %}ball-hit{% endif %}">{{ n|fmt_num }}</span>
@@ -1011,7 +1391,12 @@ TEMPLATE = """
                         <tbody>
                             {% for t in dlt_current_tickets|reverse %}
                             <tr>
-                                <td>{{ t.issue }}</td>
+                                <td>
+                                    {% if t.recommended %}
+                                      <span class="tag-rec">荐</span>
+                                    {% endif %}
+                                    {{ t.issue }}
+                                </td>
                                 <td>
                                     {% for n in t.nums[0] %}
                                       <span class="ball ball-red {% if dlt_current_win and n in dlt_current_win.nums[0] %}ball-hit{% endif %}">{{ n|fmt_num }}</span>
